@@ -10,4 +10,7 @@
 		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<InternalsVisibleTo Include="DotNetSseClient.Tests" />
+	</ItemGroup>
 </Project>

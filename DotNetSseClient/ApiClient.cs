@@ -7,7 +7,7 @@ namespace DotNetSseClient;
 
 internal sealed class ApiClient<T>(
     HttpClient httpClient,
-    Func<HttpRequestHeaders, CancellationToken, ValueTask>? configureHeaders = null) 
+    Func<HttpRequestHeaders, CancellationToken, ValueTask>? configureHeaders = null) : IDisposable
 {
     private readonly TimeSpan _defaultReconnectDelay = TimeSpan.FromSeconds(3);
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);

@@ -4,6 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackageId>DotNetSseClient</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Paul Karam</Authors>
+    <Description>A lightweight, HttpClient-based Server-Sent Events (SSE) client with keyed DI registration for .NET applications.</Description>
+    <PackageTags>sse;server-sent-events;httpclient;streaming;dotnet</PackageTags>
+    <PackageProjectUrl>https://github.com/tiger4589/dotnet-sse-client</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/tiger4589/dotnet-sse-client</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>Initial public release.</PackageReleaseNotes>
   </PropertyGroup>
 
 	<ItemGroup>
@@ -12,5 +23,9 @@
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="DotNetSseClient.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="..\README.md" Pack="true" PackagePath="\" Link="README.md" />
 	</ItemGroup>
 </Project>

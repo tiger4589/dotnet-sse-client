@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DotNetSseClient.Tests;
@@ -51,6 +52,68 @@ public sealed class StreamingServiceTests
         Assert.Null(provider.GetService<StreamingService<TestMessage>>());
         Assert.False(typeof(ApiClient<>).IsPublic);
         Assert.True(typeof(StreamingService<>).IsPublic);
+    }
+
+    [Fact]
+    public async Task MessageHandlerException_IsReportedThroughErrorEvent()
+    {
+        var apiClient = new ApiClient<TestMessage>(
+            new HttpClient { BaseAddress = new Uri("https://example.test/") });
+        using var ownedApiClient = apiClient;
+        await using var service = new StreamingService<TestMessage>(apiClient);
+
+        var errors = new List<Exception>();
+        service.Error += errors.Add;
+        service.MessageReceived += _ => throw new InvalidOperationException("Message callback failed.");
+
+        InvokePrivate(service, "NotifyMessageReceived", new TestMessage("value"));
+
+        var error = Assert.IsType<InvalidOperationException>(Assert.Single(errors));
+        Assert.Equal("An SSE message handler failed.", error.Message);
+        Assert.IsType<InvalidOperationException>(error.InnerException);
+    }
+
+    [Fact]
+    public async Task DisconnectedHandlerException_IsReportedThroughErrorEvent()
+    {
+        var apiClient = new ApiClient<TestMessage>(
+            new HttpClient { BaseAddress = new Uri("https://example.test/") });
+        using var ownedApiClient = apiClient;
+        await using var service = new StreamingService<TestMessage>(apiClient);
+
+        var errors = new List<Exception>();
+        service.Error += errors.Add;
+        service.Disconnected += () => throw new InvalidOperationException("Disconnected callback failed.");
+
+        InvokePrivate(service, "NotifyDisconnected");
+
+        var error = Assert.IsType<InvalidOperationException>(Assert.Single(errors));
+        Assert.Equal("An SSE disconnection handler failed.", error.Message);
+        Assert.IsType<InvalidOperationException>(error.InnerException);
+    }
+
+    [Fact]
+    public async Task ErrorHandlers_ContinueAfterSubscriberFailure()
+    {
+        var apiClient = new ApiClient<TestMessage>(
+            new HttpClient { BaseAddress = new Uri("https://example.test/") });
+        using var ownedApiClient = apiClient;
+        await using var service = new StreamingService<TestMessage>(apiClient);
+
+        var invoked = 0;
+        service.Error += _ => throw new InvalidOperationException("First error handler failed.");
+        service.Error += _ => invoked++;
+
+        InvokePrivate(service, "NotifyError", new InvalidOperationException("Original error"));
+
+        Assert.Equal(1, invoked);
+    }
+
+    private static void InvokePrivate(object instance, string methodName, params object?[]? parameters)
+    {
+        var method = instance.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method.Invoke(instance, parameters);
     }
 
     private sealed record TestMessage(string Name);

@@ -7,10 +7,11 @@ on:
       - "v*.*.*"
 
 jobs:
-  publish:
+  build-and-publish:
     runs-on: ubuntu-latest
-    if: ${{ secrets.NUGET_API_KEY != '' }}
-
+    permissions:
+      id-token: write  
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +33,11 @@ jobs:
       - name: Pack
         run: dotnet pack DotNetSseClient/DotNetSseClient.csproj -c Release --no-build -o artifacts/nuget
 
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+          
       - name: Push package to NuGet
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push "artifacts/nuget/*.nupkg" --api-key "$NUGET_API_KEY" --source "https://api.nuget.org/v3/index.json" --skip-duplicate
+        run: dotnet nuget push "artifacts/nuget/*.nupkg" --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source "https://api.nuget.org/v3/index.json" --skip-duplicate

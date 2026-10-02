@@ -55,6 +55,33 @@ public sealed class StreamingServiceTests
     }
 
     [Fact]
+    public async Task AddSseClient_WithServiceProviderCallbacks_ResolvesSuccessfully()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<TokenProvider>();
+        services.AddSseClient<TestMessage>(
+            "secure",
+            "https://secure.example.test/",
+            configureRequest: (serviceProvider, request, cancellationToken) =>
+            {
+                var tokenProvider = serviceProvider.GetRequiredService<TokenProvider>();
+                request.Headers.Authorization = new("Bearer", tokenProvider.GetToken(cancellationToken));
+                return ValueTask.CompletedTask;
+            },
+            onUnauthorized: (serviceProvider, _, cancellationToken) =>
+            {
+                var tokenProvider = serviceProvider.GetRequiredService<TokenProvider>();
+                tokenProvider.Refresh(cancellationToken);
+                return ValueTask.FromResult(true);
+            });
+        await using var provider = services.BuildServiceProvider();
+
+        var service = provider.GetRequiredKeyedService<StreamingService<TestMessage>>("secure");
+
+        Assert.NotNull(service);
+    }
+
+    [Fact]
     public async Task MessageHandlerException_IsReportedThroughErrorEvent()
     {
         var apiClient = new ApiClient<TestMessage>(
@@ -139,6 +166,7 @@ public sealed class StreamingServiceTests
             response.Content.Headers.ContentType = new MediaTypeHeaderValue("text/event-stream");
             return Task.FromResult(response);
         }
+
     }
 
     private sealed class BlockingStream(TaskCompletionSource requestCancelled) : Stream
@@ -192,6 +220,20 @@ public sealed class StreamingServiceTests
         public override void Write(byte[] buffer, int offset, int count)
         {
             throw new NotSupportedException();
+        }
+    }
+
+    private sealed class TokenProvider
+    {
+        public string GetToken(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return "token";
+        }
+
+        public void Refresh(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
         }
     }
 }

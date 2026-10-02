@@ -7,7 +7,7 @@ namespace DotNetSseClient.Tests;
 public sealed class ApiClientTests
 {
     [Fact]
-    public async Task StreamAsync_ParsesFramesAndRefreshesAuthenticationOnReconnect()
+    public async Task StreamAsync_ParsesFramesAndRetriesAfterUnauthorizedResponse()
     {
         var requests = new List<RequestSnapshot>();
         var handler = new DelegateHandler((request, attempt, _) =>
@@ -28,14 +28,22 @@ public sealed class ApiClientTests
         });
         using var httpClient = new HttpClient(handler);
         httpClient.BaseAddress = new Uri("https://example.test/");
-        var tokenNumber = 0;
+        var issuedTokenCount = 0;
+        var unauthorizedHandlerCalls = 0;
         using var apiClient = new ApiClient<TestMessage>(
             httpClient,
-            (headers, _) =>
+            (request, cancellationToken) =>
             {
-                headers.Authorization = new AuthenticationHeaderValue("Bearer", $"token-{++tokenNumber}");
-                headers.Add("X-Tenant-Id", "tenant");
+                cancellationToken.ThrowIfCancellationRequested();
+                request.Headers.Authorization =
+                    new AuthenticationHeaderValue("Bearer", $"token-{++issuedTokenCount}");
                 return ValueTask.CompletedTask;
+            },
+            (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                unauthorizedHandlerCalls++;
+                return ValueTask.FromResult(true);
             });
         var messages = new List<TestMessage>();
         var errors = new List<Exception>();
@@ -51,12 +59,15 @@ public sealed class ApiClientTests
         var message = Assert.Single(messages);
         Assert.Equal("first", message.Name);
         Assert.Equal(1, disconnects);
-        Assert.Equal(2, requests.Count);
-        Assert.Equal("Bearer token-1", requests[0].Authorization);
-        Assert.Equal("Bearer token-2", requests[1].Authorization);
-        Assert.Equal("tenant", requests[1].TenantId);
+        Assert.Equal(3, requests.Count);
+        Assert.NotNull(requests[0].Authorization);
+        Assert.NotNull(requests[1].Authorization);
+        Assert.NotNull(requests[2].Authorization);
+        Assert.Equal(3, issuedTokenCount);
+        Assert.Equal(1, unauthorizedHandlerCalls);
         Assert.Null(requests[0].LastEventId);
         Assert.Equal("event-42", requests[1].LastEventId);
+        Assert.Equal("event-42", requests[2].LastEventId);
         Assert.Equal("text/event-stream", requests[0].Accept);
         Assert.IsType<HttpRequestException>(Assert.Single(errors));
     }
@@ -94,7 +105,7 @@ public sealed class ApiClientTests
     }
 
     [Fact]
-    public async Task StreamAsync_DoesNotSendWhenAuthenticationConfigurationFails()
+    public async Task StreamAsync_DoesNotSendWhenRequestConfigurationFails()
     {
         var handler = new DelegateHandler((_, _, _) =>
             throw new InvalidOperationException("The request must not be sent."));
@@ -133,7 +144,6 @@ public sealed class ApiClientTests
 
     private sealed record RequestSnapshot(
         string? Authorization,
-        string? TenantId,
         string? LastEventId,
         string? Accept)
     {
@@ -141,9 +151,6 @@ public sealed class ApiClientTests
         {
             return new RequestSnapshot(
                 request.Headers.Authorization?.ToString(),
-                request.Headers.TryGetValues("X-Tenant-Id", out var tenantIds)
-                    ? tenantIds.Single()
-                    : null,
                 request.Headers.TryGetValues("Last-Event-ID", out var eventIds)
                     ? eventIds.Single()
                     : null,

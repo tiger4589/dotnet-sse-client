@@ -7,7 +7,8 @@ namespace DotNetSseClient;
 
 internal sealed class ApiClient<T>(
     HttpClient httpClient,
-    Func<HttpRequestHeaders, CancellationToken, ValueTask>? configureHeaders = null) : IDisposable
+    Func<HttpRequestMessage, CancellationToken, ValueTask>? configureRequest = null,
+    Func<HttpRequestMessage, CancellationToken, ValueTask<bool>>? onUnauthorized = null) : IDisposable
 {
     private readonly TimeSpan _defaultReconnectDelay = TimeSpan.FromSeconds(3);
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
@@ -25,79 +26,118 @@ internal sealed class ApiClient<T>(
         while (!cancellationToken.IsCancellationRequested)
         {
             var wasConnected = false;
+            var hasRefreshedTokenOnCurrentConnectionAttempt = false;
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-                if (!string.IsNullOrEmpty(lastEventId))
+                while (true)
                 {
-                    request.Headers.TryAddWithoutValidation("Last-Event-ID", lastEventId);
-                }
+                    using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-                if (configureHeaders is not null)
-                {
-                    try
+                    if (!string.IsNullOrEmpty(lastEventId))
                     {
-                        await configureHeaders(request.Headers, cancellationToken).ConfigureAwait(false);
+                        request.Headers.TryAddWithoutValidation("Last-Event-ID", lastEventId);
                     }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+
+                    if (configureRequest is not null)
                     {
+                        try
+                        {
+                            await configureRequest(request, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                        catch (Exception exception)
+                        {
+                            onError(new InvalidOperationException("Configuring the SSE request failed.", exception));
+                            return;
+                        }
+                    }
+
+                    using var response = await httpClient.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken).ConfigureAwait(false);
+
+                    if (response.StatusCode == HttpStatusCode.Unauthorized
+                        && onUnauthorized is not null
+                        && !hasRefreshedTokenOnCurrentConnectionAttempt)
+                    {
+                        bool shouldRetry;
+                        try
+                        {
+                            shouldRetry = await onUnauthorized(request, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                        catch (Exception exception)
+                        {
+                            onError(new InvalidOperationException(
+                                "Handling an SSE unauthorized response failed.",
+                                exception));
+                            return;
+                        }
+
+                        if (!shouldRetry)
+                        {
+                            onError(new HttpRequestException(
+                                $"The SSE endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}).",
+                                null,
+                                response.StatusCode));
+                            return;
+                        }
+
+                        hasRefreshedTokenOnCurrentConnectionAttempt = true;
+                        continue;
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var exception = new HttpRequestException(
+                            $"The SSE endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}).",
+                            null,
+                            response.StatusCode);
+                        onError(exception);
+
+                        if (!IsRetryable(response.StatusCode))
+                        {
+                            return;
+                        }
+
+                        break;
+                    }
+
+                    if (!string.Equals(
+                            response.Content.Headers.ContentType?.MediaType,
+                            "text/event-stream",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        onError(new InvalidOperationException(
+                            "The SSE endpoint response must have a text/event-stream content type."));
                         return;
                     }
-                    catch (Exception exception)
-                    {
-                        onError(new InvalidOperationException("Configuring the SSE request headers failed.", exception));
-                        return;
-                    }
+
+                    wasConnected = true;
+                    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    using var reader = new StreamReader(stream);
+
+                    await ReadEventsAsync(
+                        reader,
+                        onMessage,
+                        onError,
+                        value => lastEventId = value,
+                        value => reconnectDelay = value,
+                        cancellationToken).ConfigureAwait(false);
+
+                    onDisconnected();
+                    break;
                 }
 
-                using var response = await httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken).ConfigureAwait(false);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var exception = new HttpRequestException(
-                        $"The SSE endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}).",
-                        null,
-                        response.StatusCode);
-                    onError(exception);
-
-                    if (!IsRetryable(response.StatusCode))
-                    {
-                        return;
-                    }
-
-                    await DelayBeforeReconnectAsync(reconnectDelay, cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                if (!string.Equals(
-                        response.Content.Headers.ContentType?.MediaType,
-                        "text/event-stream",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    onError(new InvalidOperationException(
-                        "The SSE endpoint response must have a text/event-stream content type."));
-                    return;
-                }
-
-                wasConnected = true;
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                using var reader = new StreamReader(stream);
-
-                await ReadEventsAsync(
-                    reader,
-                    onMessage,
-                    onError,
-                    value => lastEventId = value,
-                    value => reconnectDelay = value,
-                    cancellationToken).ConfigureAwait(false);
-
-                onDisconnected();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

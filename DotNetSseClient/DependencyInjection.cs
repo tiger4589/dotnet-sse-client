@@ -1,5 +1,4 @@
-﻿using System.Net.Http.Headers;
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 
 namespace DotNetSseClient;
 
@@ -9,12 +8,38 @@ public static class DependencyInjection
         this IServiceCollection services,
         string key,
         string baseAddress,
-        Func<HttpRequestHeaders, CancellationToken, ValueTask>? configureHeaders = null)
+        Func<IServiceProvider, HttpRequestMessage, CancellationToken, ValueTask>? configureRequest = null,
+        Func<IServiceProvider, HttpRequestMessage, CancellationToken, ValueTask<bool>>? onUnauthorized = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentException.ThrowIfNullOrWhiteSpace(baseAddress);
 
+        var baseUri = CreateBaseUri(baseAddress);
+
+        services.AddKeyedScoped<ApiClient<T>>(key, (serviceProvider, _) =>
+            new ApiClient<T>(
+                new HttpClient
+                {
+                    BaseAddress = baseUri,
+                    Timeout = Timeout.InfiniteTimeSpan
+                },
+                configureRequest is null
+                    ? null
+                    : (request, cancellationToken) => configureRequest(serviceProvider, request, cancellationToken),
+                onUnauthorized is null
+                    ? null
+                    : (request, cancellationToken) => onUnauthorized(serviceProvider, request, cancellationToken)));
+
+        services.AddKeyedScoped<StreamingService<T>>(key, (serviceProvider, registeredKey) =>
+            new StreamingService<T>(
+                serviceProvider.GetRequiredKeyedService<ApiClient<T>>(registeredKey)));
+
+        return services;
+    }
+
+    private static Uri CreateBaseUri(string baseAddress)
+    {
         var baseUri = new Uri(baseAddress, UriKind.Absolute);
         if (baseUri.Scheme is not ("http" or "https"))
         {
@@ -23,19 +48,6 @@ public static class DependencyInjection
                 nameof(baseAddress));
         }
 
-        services.AddKeyedScoped<ApiClient<T>>(key, (_, _) =>
-            new ApiClient<T>(
-                new HttpClient
-                {
-                    BaseAddress = baseUri,
-                    Timeout = Timeout.InfiniteTimeSpan
-                },
-                configureHeaders));
-
-        services.AddKeyedScoped<StreamingService<T>>(key, (serviceProvider, registeredKey) =>
-            new StreamingService<T>(
-                serviceProvider.GetRequiredKeyedService<ApiClient<T>>(registeredKey)));
-
-        return services;
+        return baseUri;
     }
 }

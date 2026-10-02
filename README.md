@@ -22,15 +22,13 @@ var services = new ServiceCollection();
 services.AddSingleton<TokenProvider>();
 services.AddSseClient<MyEvent>(
     key: "events",
-    baseAddress: "https://api.example.com/",
-    configureRequest: (serviceProvider, request, cancellationToken) =>
+    baseAddress: "https://api.example.com/")
+    .WithBearerToken((serviceProvider, cancellationToken) =>
     {
         var tokenProvider = serviceProvider.GetRequiredService<[YourTokenProvider]>();
-        request.Headers.Authorization =
-            new("Bearer", tokenProvider.GetToken(cancellationToken));
-        return ValueTask.CompletedTask;
-    },
-    onUnauthorized: (serviceProvider, _, cancellationToken) =>
+        return ValueTask.FromResult(tokenProvider.GetToken(cancellationToken));
+    })
+    .OnUnauthorized((serviceProvider, _, cancellationToken) =>
     {
         var tokenProvider = serviceProvider.GetRequiredService<[YourTokenProvider]>();
         tokenProvider.Refresh(cancellationToken);
@@ -38,19 +36,19 @@ services.AddSseClient<MyEvent>(
     });
 
 await using var provider = services.BuildServiceProvider();
-var stream = provider.GetRequiredKeyedService<StreamingService<MyEvent>>("events");
+var stream = provider.GetRequiredKeyedService<SseClient<MyEvent>>("events");
 
-stream.MessageReceived += message => Console.WriteLine(message);
-stream.Error += ex => Console.Error.WriteLine(ex);
-stream.Disconnected += () => Console.WriteLine("Disconnected.");
-
-await stream.StartAsync("sse/updates");
+await stream.StartAsync(
+    "sse/updates",
+    onMessage: message => Console.WriteLine(message),
+    onError: ex => Console.Error.WriteLine(ex),
+    onDisconnected: () => Console.WriteLine("Disconnected."));
 ```
 
 ## Behavior notes
 
-- Endpoints passed to `StartAsync` must be relative to the configured base address.
-- `configureRequest` is invoked for every connect/reconnect attempt.
+- Endpoints passed to `StartAsync` can be relative or absolute.
+- `WithBearerToken` and `WithApiKey` are applied on every connect/reconnect attempt.
 - `onUnauthorized` is invoked on HTTP 401 and can opt into one immediate retry.
 - The client validates `text/event-stream` responses.
 - Automatic reconnect is supported, including `Last-Event-ID` continuation.

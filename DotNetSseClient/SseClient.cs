@@ -1,33 +1,30 @@
 ﻿namespace DotNetSseClient;
 
-public sealed class StreamingService<T> : IAsyncDisposable
+public sealed class SseClient<T> : IAsyncDisposable
 {
     private readonly ApiClient<T> _apiClient;
     private readonly Lock _stateLock = new();
     private CancellationTokenSource? _streamCancellation;
     private Task? _streamTask;
+    private Action<T>? _onMessage;
+    private Action<Exception>? _onError;
+    private Action? _onDisconnected;
     private bool _disposed;
 
-    internal StreamingService(ApiClient<T> apiClient)
+    internal SseClient(ApiClient<T> apiClient)
     {
         _apiClient = apiClient;
     }
 
-    public event Action<T>? MessageReceived;
-
-    public event Action<Exception>? Error;
-
-    public event Action? Disconnected;
-
-    public Task StartAsync(string endpoint, CancellationToken cancellationToken = default)
+    public Task StartAsync(
+        string endpoint,
+        Action<T> onMessage,
+        Action<Exception>? onError = null,
+        Action? onDisconnected = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(endpoint);
-        if (Uri.TryCreate(endpoint, UriKind.Absolute, out _))
-        {
-            throw new ArgumentException(
-                "The SSE endpoint must be relative to the configured base address.",
-                nameof(endpoint));
-        }
+        ArgumentNullException.ThrowIfNull(onMessage);
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -37,11 +34,14 @@ public sealed class StreamingService<T> : IAsyncDisposable
 
             if (_streamTask is { IsCompleted: false })
             {
-                throw new InvalidOperationException("This streaming service is already running.");
+                return Task.CompletedTask;
             }
 
             _streamCancellation?.Dispose();
             _streamCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _onMessage = onMessage;
+            _onError = onError;
+            _onDisconnected = onDisconnected;
             _streamTask = RunStreamAsync(endpoint, _streamCancellation.Token);
         }
 
@@ -118,64 +118,52 @@ public sealed class StreamingService<T> : IAsyncDisposable
 
     private void NotifyMessageReceived(T message)
     {
-        if (MessageReceived is not { } handlers)
+        if (_onMessage is null)
         {
             return;
         }
 
-        foreach (var @delegate in handlers.GetInvocationList())
+        try
         {
-            var handler = (Action<T>)@delegate;
-            try
-            {
-                handler(message);
-            }
-            catch (Exception exception)
-            {
-                NotifyError(new InvalidOperationException("An SSE message handler failed.", exception));
-            }
+            _onMessage(message);
+        }
+        catch (Exception exception)
+        {
+            NotifyError(new InvalidOperationException("An SSE message handler failed.", exception));
         }
     }
 
     private void NotifyError(Exception exception)
     {
-        if (Error is not { } handlers)
+        if (_onError is null)
         {
             return;
         }
 
-        foreach (var @delegate in handlers.GetInvocationList())
+        try
         {
-            var handler = (Action<Exception>)@delegate;
-            try
-            {
-                handler(exception);
-            }
-            catch
-            {
-                // Subscriber failures must not terminate the stream or prevent cleanup.
-            }
+            _onError(exception);
+        }
+        catch
+        {
+            // Subscriber failures must not terminate the stream or prevent cleanup.
         }
     }
 
     private void NotifyDisconnected()
     {
-        if (Disconnected is not { } handlers)
+        if (_onDisconnected is null)
         {
             return;
         }
 
-        foreach (var @delegate in handlers.GetInvocationList())
+        try
         {
-            var handler = (Action)@delegate;
-            try
-            {
-                handler();
-            }
-            catch (Exception exception)
-            {
-                NotifyError(new InvalidOperationException("An SSE disconnection handler failed.", exception));
-            }
+            _onDisconnected();
+        }
+        catch (Exception exception)
+        {
+            NotifyError(new InvalidOperationException("An SSE disconnection handler failed.", exception));
         }
     }
 }

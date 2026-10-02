@@ -5,36 +5,40 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace DotNetSseClient.Tests;
 
-public sealed class StreamingServiceTests
+public sealed class SseClientTests
 {
     [Fact]
-    public async Task StopAsync_CancelsAnActiveStream()
+    public async Task StartAsync_WhenAlreadyRunning_ReturnsWithoutThrowing()
     {
         var handler = new BlockingHandler();
         var apiClient = new ApiClient<TestMessage>(
             new HttpClient(handler) { BaseAddress = new Uri("https://example.test/") });
         using var ownedApiClient = apiClient;
-        await using var service = new StreamingService<TestMessage>(apiClient);
+        await using var service = new SseClient<TestMessage>(apiClient);
 
-        await service.StartAsync("events");
+        await service.StartAsync("events", _ => { });
         await handler.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => service.StartAsync("other-events"));
+        await service.StartAsync("other-events", _ => { });
         await service.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(handler.RequestCancelled.Task.IsCompletedSuccessfully);
     }
 
     [Fact]
-    public async Task StartAsync_RejectsAnAbsoluteEndpoint()
+    public async Task StartAsync_AllowsAnAbsoluteEndpoint()
     {
+        var handler = new EndpointCaptureHandler();
         var apiClient = new ApiClient<TestMessage>(
-            new HttpClient { BaseAddress = new Uri("https://example.test/") });
+            new HttpClient(handler) { BaseAddress = new Uri("https://example.test/") });
         using var ownedApiClient = apiClient;
-        await using var service = new StreamingService<TestMessage>(apiClient);
+        await using var service = new SseClient<TestMessage>(apiClient);
 
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => service.StartAsync("https://other.example.test/events"));
+        await service.StartAsync("https://other.example.test/events", _ => { });
+        await handler.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.StopAsync();
+
+        Assert.Equal("https://other.example.test/events", handler.RequestUri);
     }
 
     [Fact]
@@ -45,30 +49,28 @@ public sealed class StreamingServiceTests
         services.AddSseClient<TestMessage>("secondary", "https://secondary.example.test/");
         await using var provider = services.BuildServiceProvider();
 
-        var primary = provider.GetRequiredKeyedService<StreamingService<TestMessage>>("primary");
-        var secondary = provider.GetRequiredKeyedService<StreamingService<TestMessage>>("secondary");
+        var primary = provider.GetRequiredKeyedService<SseClient<TestMessage>>("primary");
+        var secondary = provider.GetRequiredKeyedService<SseClient<TestMessage>>("secondary");
 
         Assert.NotSame(primary, secondary);
-        Assert.Null(provider.GetService<StreamingService<TestMessage>>());
+        Assert.Null(provider.GetService<SseClient<TestMessage>>());
         Assert.False(typeof(ApiClient<>).IsPublic);
-        Assert.True(typeof(StreamingService<>).IsPublic);
+        Assert.True(typeof(SseClient<>).IsPublic);
     }
 
     [Fact]
-    public async Task AddSseClient_WithServiceProviderCallbacks_ResolvesSuccessfully()
+    public async Task AddSseClient_WithBuilderCallbacks_ResolvesSuccessfully()
     {
         var services = new ServiceCollection();
         services.AddSingleton<TokenProvider>();
-        services.AddSseClient<TestMessage>(
-            "secure",
-            "https://secure.example.test/",
-            configureRequest: (serviceProvider, request, cancellationToken) =>
+        services.AddSseClient<TestMessage>("secure", "https://secure.example.test/")
+            .WithBearerToken((serviceProvider, cancellationToken) =>
             {
                 var tokenProvider = serviceProvider.GetRequiredService<TokenProvider>();
-                request.Headers.Authorization = new("Bearer", tokenProvider.GetToken(cancellationToken));
-                return ValueTask.CompletedTask;
-            },
-            onUnauthorized: (serviceProvider, _, cancellationToken) =>
+                return ValueTask.FromResult(tokenProvider.GetToken(cancellationToken));
+            })
+            .WithApiKey("X-Api-Key", "secret")
+            .OnUnauthorized((serviceProvider, _, cancellationToken) =>
             {
                 var tokenProvider = serviceProvider.GetRequiredService<TokenProvider>();
                 tokenProvider.Refresh(cancellationToken);
@@ -76,22 +78,23 @@ public sealed class StreamingServiceTests
             });
         await using var provider = services.BuildServiceProvider();
 
-        var service = provider.GetRequiredKeyedService<StreamingService<TestMessage>>("secure");
+        var service = provider.GetRequiredKeyedService<SseClient<TestMessage>>("secure");
 
         Assert.NotNull(service);
     }
 
     [Fact]
-    public async Task MessageHandlerException_IsReportedThroughErrorEvent()
+    public async Task MessageHandlerException_IsReportedThroughOnErrorCallback()
     {
         var apiClient = new ApiClient<TestMessage>(
             new HttpClient { BaseAddress = new Uri("https://example.test/") });
         using var ownedApiClient = apiClient;
-        await using var service = new StreamingService<TestMessage>(apiClient);
+        await using var service = new SseClient<TestMessage>(apiClient);
 
         var errors = new List<Exception>();
-        service.Error += errors.Add;
-        service.MessageReceived += _ => throw new InvalidOperationException("Message callback failed.");
+        SetPrivateField(service, "_onError", (Action<Exception>)errors.Add);
+        SetPrivateField(service, "_onMessage", (Action<TestMessage>)(_ =>
+            throw new InvalidOperationException("Message callback failed.")));
 
         InvokePrivate(service, "NotifyMessageReceived", new TestMessage("value"));
 
@@ -101,16 +104,17 @@ public sealed class StreamingServiceTests
     }
 
     [Fact]
-    public async Task DisconnectedHandlerException_IsReportedThroughErrorEvent()
+    public async Task DisconnectedHandlerException_IsReportedThroughOnErrorCallback()
     {
         var apiClient = new ApiClient<TestMessage>(
             new HttpClient { BaseAddress = new Uri("https://example.test/") });
         using var ownedApiClient = apiClient;
-        await using var service = new StreamingService<TestMessage>(apiClient);
+        await using var service = new SseClient<TestMessage>(apiClient);
 
         var errors = new List<Exception>();
-        service.Error += errors.Add;
-        service.Disconnected += () => throw new InvalidOperationException("Disconnected callback failed.");
+        SetPrivateField(service, "_onError", (Action<Exception>)errors.Add);
+        SetPrivateField(service, "_onDisconnected", (Action)(() =>
+            throw new InvalidOperationException("Disconnected callback failed.")));
 
         InvokePrivate(service, "NotifyDisconnected");
 
@@ -120,20 +124,17 @@ public sealed class StreamingServiceTests
     }
 
     [Fact]
-    public async Task ErrorHandlers_ContinueAfterSubscriberFailure()
+    public async Task OnErrorFailure_DoesNotThrow()
     {
         var apiClient = new ApiClient<TestMessage>(
             new HttpClient { BaseAddress = new Uri("https://example.test/") });
         using var ownedApiClient = apiClient;
-        await using var service = new StreamingService<TestMessage>(apiClient);
+        await using var service = new SseClient<TestMessage>(apiClient);
 
-        var invoked = 0;
-        service.Error += _ => throw new InvalidOperationException("First error handler failed.");
-        service.Error += _ => invoked++;
+        SetPrivateField(service, "_onError", (Action<Exception>)(_ =>
+            throw new InvalidOperationException("Error callback failed.")));
 
         InvokePrivate(service, "NotifyError", new InvalidOperationException("Original error"));
-
-        Assert.Equal(1, invoked);
     }
 
     private static void InvokePrivate(object instance, string methodName, params object?[]? parameters)
@@ -141,6 +142,13 @@ public sealed class StreamingServiceTests
         var method = instance.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
         method.Invoke(instance, parameters);
+    }
+
+    private static void SetPrivateField(object instance, string fieldName, object? value)
+    {
+        var field = instance.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        field.SetValue(instance, value);
     }
 
     private sealed record TestMessage(string Name);
@@ -167,6 +175,23 @@ public sealed class StreamingServiceTests
             return Task.FromResult(response);
         }
 
+    }
+
+    private sealed class EndpointCaptureHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource RequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string? RequestUri { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestUri = request.RequestUri?.ToString();
+            RequestStarted.TrySetResult();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
     }
 
     private sealed class BlockingStream(TaskCompletionSource requestCancelled) : Stream

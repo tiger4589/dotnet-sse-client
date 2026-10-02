@@ -19,7 +19,6 @@ using DotNetSseClient;
 using Microsoft.Extensions.DependencyInjection;
 
 var services = new ServiceCollection();
-services.AddSingleton<TokenProvider>();
 services.AddSseClient<MyEvent>(
     key: "events",
     baseAddress: "https://api.example.com/")
@@ -44,6 +43,10 @@ await stream.StartAsync(
     onError: ex => Console.Error.WriteLine(ex),
     onDisconnected: () => Console.WriteLine("Disconnected."));
 ```
+
+## Why keyed DI Registration?
+
+In case you need to consume two different SSE streams in the same application using the same type, you can register two `SseClient<T>` instances with different keys and configurations.
 
 ## Behavior notes
 

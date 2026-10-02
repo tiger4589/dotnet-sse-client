@@ -1,6 +1,6 @@
-﻿using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.ServerSentEvents;
 using System.Text.Json;
 
 namespace DotNetSseClient;
@@ -124,10 +124,9 @@ internal sealed class ApiClient<T>(
 
                     wasConnected = true;
                     await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                    using var reader = new StreamReader(stream);
 
                     await ReadEventsAsync(
-                        reader,
+                        stream,
                         onMessage,
                         onError,
                         value => lastEventId = value,
@@ -162,77 +161,39 @@ internal sealed class ApiClient<T>(
     }
 
     private async Task ReadEventsAsync(
-        StreamReader reader,
+        Stream stream,
         Action<T> onMessage,
         Action<Exception> onError,
         Action<string> setLastEventId,
         Action<TimeSpan> setReconnectDelay,
         CancellationToken cancellationToken)
     {
-        var dataLines = new List<string>();
-        var isFirstLine = true;
+        var parser = SseParser.Create(stream);
 
-        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        await foreach (var item in parser.EnumerateAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (isFirstLine)
+            if (!string.IsNullOrEmpty(item.EventId) && !item.EventId.Contains('\0'))
             {
-                line = line.TrimStart('\uFEFF');
-                isFirstLine = false;
+                setLastEventId(item.EventId);
             }
 
-            if (line.Length == 0)
+            if (item.ReconnectionInterval is { } reconnectInterval)
             {
-                DispatchMessage(dataLines, onMessage, onError);
-                continue;
+                setReconnectDelay(reconnectInterval);
             }
 
-            if (line[0] == ':')
+            if (!string.IsNullOrEmpty(item.Data))
             {
-                continue;
-            }
-
-            var colonIndex = line.IndexOf(':');
-            var field = colonIndex < 0 ? line : line[..colonIndex];
-            var value = colonIndex < 0 ? string.Empty : line[(colonIndex + 1)..];
-            if (value.StartsWith(' '))
-            {
-                value = value[1..];
-            }
-
-            switch (field)
-            {
-                case "data":
-                    dataLines.Add(value);
-                    break;
-
-                case "id" when !value.Contains('\0'):
-                    setLastEventId(value);
-                    break;
-
-                case "retry" when int.TryParse(
-                    value,
-                    NumberStyles.None,
-                    CultureInfo.InvariantCulture,
-                    out var retryMilliseconds):
-                    setReconnectDelay(TimeSpan.FromMilliseconds(retryMilliseconds));
-                    break;
+                DispatchMessage(item.Data, onMessage, onError);
             }
         }
     }
 
     private void DispatchMessage(
-        List<string> dataLines,
+        string payload,
         Action<T> onMessage,
         Action<Exception> onError)
     {
-        if (dataLines.Count == 0)
-        {
-            return;
-        }
-
-        var payload = string.Join('\n', dataLines);
-        dataLines.Clear();
-
         try
         {
             var message = JsonSerializer.Deserialize<T>(payload, _serializerOptions);

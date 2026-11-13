@@ -1,43 +1,69 @@
 name: Publish NuGet
 
+# Publishing is driven only by version tags (vMAJOR.MINOR.PATCH[-prerelease]).
+# The package version is taken from the tag, so the csproj <Version> never has to be bumped by hand.
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*.*.*"
+
+permissions:
+  contents: read
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write  
-      
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Determine version from tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' is not a valid vMAJOR.MINOR.PATCH[-prerelease] version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
 
       - name: Restore
         run: dotnet restore DotNetSseClient.slnx
 
       - name: Build
-        run: dotnet build DotNetSseClient.slnx -c Release --no-restore
+        run: dotnet build DotNetSseClient.slnx -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
 
       - name: Test
         run: dotnet test DotNetSseClient.slnx -c Release --no-build
 
       - name: Pack
-        run: dotnet pack DotNetSseClient/DotNetSseClient.csproj -c Release --no-build -o artifacts/nuget
+        run: dotnet pack DotNetSseClient/DotNetSseClient.csproj -c Release --no-build -o artifacts/nuget -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Verify package version
+        run: |
+          expected="artifacts/nuget/DotNetSseClient.${{ steps.version.outputs.version }}.nupkg"
+          if [ ! -f "$expected" ]; then
+            echo "::error::Expected $expected but found:"; ls artifacts/nuget; exit 1
+          fi
 
       - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login
         with:
           user: ${{ secrets.NUGET_USER }}
-          
+
+      # Pushing the .nupkg also pushes the matching .snupkg symbol package.
+      # --skip-duplicate only makes re-running the same tag idempotent; a new tag always yields a new version.
       - name: Push package to NuGet
-        run: dotnet nuget push "artifacts/nuget/*.nupkg" --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source "https://api.nuget.org/v3/index.json" --skip-duplicate
+        run: dotnet nuget push "artifacts/nuget/*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source "https://api.nuget.org/v3/index.json" --skip-duplicate

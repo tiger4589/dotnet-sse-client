@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    Microsoft.Extensions.* versions per target framework.
+    Defaults are the lowest version of each major (10.0.0 / 11.0.0), so the published package
+    declares the widest compatible floor: any 10.x / 11.x consumer can use it without being forced up.
+    CI also builds and tests with the latest patches by overriding these, e.g.
+      dotnet test -p:MicrosoftExtensions10Version=10.0.* -p:MicrosoftExtensions11Version=11.0.*
+  -->
+  <PropertyGroup>
+    <MicrosoftExtensions10Version Condition="'$(MicrosoftExtensions10Version)' == ''">10.0.0</MicrosoftExtensions10Version>
+    <MicrosoftExtensions11Version Condition="'$(MicrosoftExtensions11Version)' == ''">11.0.0</MicrosoftExtensions11Version>
+  </PropertyGroup>
+</Project>

@@ -7,33 +7,51 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-test-pack:
+    # lowest: builds against Microsoft.Extensions 10.0.0 / 11.0.0 (the floors the package declares).
+    # latest: builds against the newest 10.0.x / 11.0.x patches, to catch breaks in newer releases.
+    name: build-test (${{ matrix.dependencies }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dependencies: [lowest, latest]
+    env:
+      VERSION_ARGS: ${{ matrix.dependencies == 'latest' && '-p:MicrosoftExtensions10Version=10.0.* -p:MicrosoftExtensions11Version=11.0.*' || '' }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
 
       - name: Restore
-        run: dotnet restore DotNetSseClient.slnx
+        run: dotnet restore DotNetSseClient.slnx $VERSION_ARGS
 
       - name: Build
-        run: dotnet build DotNetSseClient.slnx -c Release --no-restore
+        run: dotnet build DotNetSseClient.slnx -c Release --no-restore $VERSION_ARGS
 
       - name: Test
         run: dotnet test DotNetSseClient.slnx -c Release --no-build --collect "XPlat Code Coverage"
 
       - name: Pack
+        if: matrix.dependencies == 'lowest'
         run: dotnet pack DotNetSseClient/DotNetSseClient.csproj -c Release --no-build -o artifacts/nuget
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        if: matrix.dependencies == 'lowest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nuget-package
-          path: artifacts/nuget/*.nupkg
+          path: |
+            artifacts/nuget/*.nupkg
+            artifacts/nuget/*.snupkg

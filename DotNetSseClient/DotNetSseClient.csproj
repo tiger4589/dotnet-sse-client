@@ -1,11 +1,18 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
     <PackageId>DotNetSseClient</PackageId>
-    <Version>1.2.0</Version>
+    <!-- Local default only: release builds pass -p:Version from the git tag. -->
+    <Version>2.0.0</Version>
     <Authors>Paul Karam</Authors>
     <Description>A lightweight, HttpClient-based Server-Sent Events (SSE) client with keyed DI registration for .NET applications.</Description>
     <PackageTags>sse;server-sent-events;httpclient;streaming;dotnet</PackageTags>
@@ -14,18 +21,33 @@
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>Use SseParser instead of manually parsing</PackageReleaseNotes>
+    <PackageReleaseNotes>2.0.0: singleton by default with configurable lifetime; IHttpClientFactory integration; exponential reconnect backoff with jitter and Retry-After; Completion/IsRunning and SseStreamTerminatedException for terminal failures; async message handlers; event-type filtering; configurable JSON options and source-generated JsonTypeInfo (AOT-compatible); spec-compliant Last-Event-ID reset; StartAsync throws when already running.</PackageReleaseNotes>
   </PropertyGroup>
 
-	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
-	</ItemGroup>
+  <PropertyGroup Label="SourceLink and symbols">
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
 
-	<ItemGroup>
-		<InternalsVisibleTo Include="DotNetSseClient.Tests" />
-	</ItemGroup>
+  <!-- Each target framework depends on the matching Microsoft.Extensions major; versions come from Directory.Build.props. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="$(MicrosoftExtensions10Version)" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="$(MicrosoftExtensions10Version)" />
+  </ItemGroup>
 
-	<ItemGroup>
-		<None Include="..\README.md" Pack="true" PackagePath="\" Link="README.md" />
-	</ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="$(MicrosoftExtensions11Version)" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="$(MicrosoftExtensions11Version)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotNetSseClient.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+  </ItemGroup>
 </Project>
